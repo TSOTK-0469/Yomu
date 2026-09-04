@@ -1,6 +1,7 @@
 package cn.yomu.reader.ui
 
 import android.content.ContentResolver
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageDecoder
@@ -8,13 +9,16 @@ import android.graphics.Matrix
 import android.net.Uri
 import android.os.Build
 import android.util.LruCache
+import androidx.annotation.RequiresApi
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.State
 import androidx.compose.runtime.produceState
-import androidx.annotation.RequiresApi
+import androidx.compose.ui.platform.LocalContext
 import androidx.exifinterface.media.ExifInterface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
+import java.security.MessageDigest
 import kotlin.math.max
 import kotlin.math.sqrt
 
@@ -25,26 +29,84 @@ sealed interface BitmapLoadState {
 }
 
 object LocalImageLoader {
-    private val cache = object : LruCache<String, Bitmap>(48 * 1024 * 1024) {
+    private val memoryBudget = (Runtime.getRuntime().maxMemory() / 8L)
+        .coerceIn(32L * MIB, 128L * MIB)
+        .toInt()
+    private val cache = object : LruCache<String, Bitmap>(memoryBudget) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.allocationByteCount
     }
 
-    suspend fun load(contentResolver: ContentResolver, uri: String, targetWidth: Int): Bitmap? {
+    suspend fun load(
+        context: Context,
+        contentResolver: ContentResolver,
+        uri: String,
+        targetWidth: Int,
+        diskCache: Boolean,
+        version: Long,
+    ): Bitmap? {
         val safeWidth = targetWidth.coerceIn(240, 4096)
-        val key = "$uri@$safeWidth"
-        cache.get(key)?.let { return it }
+        val key = "$uri@$safeWidth#$version"
+        synchronized(cache) { cache.get(key) }?.let { return it }
 
         return withContext(Dispatchers.IO) {
+            val cachedFile = if (diskCache) diskFile(context, key) else null
+            cachedFile?.takeIf(File::isFile)?.let { file ->
+                BitmapFactory.decodeFile(file.absolutePath)?.let { bitmap ->
+                    file.setLastModified(System.currentTimeMillis())
+                    synchronized(cache) { cache.put(key, bitmap) }
+                    return@withContext bitmap
+                }
+                file.delete()
+            }
+
             runCatching {
                 val decoded = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                     decodeModern(contentResolver, Uri.parse(uri), safeWidth)
                 } else {
                     decodeLegacy(contentResolver, Uri.parse(uri), safeWidth)
                 }
-                decoded?.also { cache.put(key, it) }
+                decoded?.also { bitmap ->
+                    synchronized(cache) { cache.put(key, bitmap) }
+                    if (cachedFile != null) writeThumbnail(cachedFile, bitmap)
+                }
             }.getOrNull()
         }
     }
+
+    suspend fun clear(context: Context) = withContext(Dispatchers.IO) {
+        synchronized(cache) { cache.evictAll() }
+        cacheDirectory(context).deleteRecursively()
+    }
+
+    private fun writeThumbnail(file: File, bitmap: Bitmap) {
+        runCatching {
+            file.parentFile?.mkdirs()
+            val format = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Bitmap.CompressFormat.WEBP_LOSSY
+            } else Bitmap.CompressFormat.JPEG
+            file.outputStream().buffered().use { bitmap.compress(format, 86, it) }
+            pruneDiskCache(file.parentFile ?: return)
+        }
+    }
+
+    private fun pruneDiskCache(directory: File) {
+        val files = directory.listFiles()?.filter(File::isFile)?.sortedBy(File::lastModified) ?: return
+        var total = files.sumOf(File::length)
+        for (file in files) {
+            if (total <= DISK_BUDGET) break
+            val length = file.length()
+            if (file.delete()) total -= length
+        }
+    }
+
+    private fun diskFile(context: Context, key: String): File =
+        File(cacheDirectory(context), "${sha256(key)}.thumb")
+
+    private fun cacheDirectory(context: Context) = File(context.cacheDir, "cover-thumbnails")
+
+    private fun sha256(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray())
+        .joinToString("") { "%02x".format(it.toInt() and 0xff) }
 
     @RequiresApi(Build.VERSION_CODES.P)
     private fun decodeModern(resolver: ContentResolver, uri: Uri, targetWidth: Int): Bitmap? {
@@ -105,6 +167,8 @@ object LocalImageLoader {
             .also { if (it !== bitmap) bitmap.recycle() }
     }
 
+    private const val MIB = 1024L * 1024L
+    private const val DISK_BUDGET = 256L * MIB
     private const val MAX_DECODE_PIXELS = 16_000_000L
 }
 
@@ -113,12 +177,19 @@ fun rememberBitmap(
     resolver: ContentResolver,
     uri: String,
     targetWidth: Int,
-): State<BitmapLoadState> = produceState<BitmapLoadState>(
-    initialValue = BitmapLoadState.Loading,
-    uri,
-    targetWidth,
-) {
-    value = LocalImageLoader.load(resolver, uri, targetWidth)
-        ?.let(BitmapLoadState::Ready)
-        ?: BitmapLoadState.Failed
+    diskCache: Boolean = false,
+    version: Long = 0L,
+): State<BitmapLoadState> {
+    val context = LocalContext.current.applicationContext
+    return produceState<BitmapLoadState>(
+        initialValue = BitmapLoadState.Loading,
+        uri,
+        targetWidth,
+        diskCache,
+        version,
+    ) {
+        value = LocalImageLoader.load(context, resolver, uri, targetWidth, diskCache, version)
+            ?.let(BitmapLoadState::Ready)
+            ?: BitmapLoadState.Failed
+    }
 }

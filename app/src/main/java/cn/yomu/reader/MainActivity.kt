@@ -15,6 +15,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,10 +45,16 @@ private fun YomuApp(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val resolver = LocalContext.current.contentResolver
     val snackbarHostState = remember { SnackbarHostState() }
+    var reauthorizeMountId by rememberSaveable { mutableStateOf<String?>(null) }
     val folderPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocumentTree(),
     ) { uri ->
-        if (uri != null) viewModel.addMount(uri)
+        val mountId = reauthorizeMountId
+        reauthorizeMountId = null
+        if (uri != null) {
+            if (mountId == null) viewModel.beginMountSetup(uri)
+            else viewModel.reauthorizeMount(mountId, uri)
+        }
     }
 
     LaunchedEffect(state.message) {
@@ -67,12 +76,46 @@ private fun YomuApp(viewModel: MainViewModel) {
             )
         } ?: LibraryScreen(
             library = state.library,
-            isScanning = state.isScanning,
+            initializing = state.initializing,
             resolver = resolver,
-            onPickFolder = { folderPicker.launch(null) },
-            onRefresh = viewModel::refresh,
+            mountBrowser = state.mountBrowser,
+            scanProgress = state.scanProgress,
+            scanTitle = state.scanTitle,
+            openingAlbum = state.openingAlbum,
+            coverPicker = state.coverPicker,
+            onPickFolder = {
+                reauthorizeMountId = null
+                folderPicker.launch(null)
+            },
+            onSelectBookshelf = viewModel::selectBookshelf,
+            onCreateBookshelf = viewModel::createBookshelf,
+            onRenameBookshelf = viewModel::renameBookshelf,
+            onDeleteBookshelf = viewModel::deleteBookshelf,
+            onSetBookshelfCover = viewModel::setBookshelfCover,
             onOpenAlbum = viewModel::open,
+            onSetAlbumBookshelves = viewModel::setAlbumBookshelves,
+            onRemoveFromCurrentBookshelf = viewModel::removeFromCurrentBookshelf,
+            onHideAlbum = viewModel::hideAlbum,
+            onShowAlbumCoverPicker = viewModel::showAlbumCoverPicker,
+            onSetAlbumCover = viewModel::setAlbumCover,
+            onRepairAlbumCover = viewModel::repairAlbumCover,
+            onDismissCoverPicker = viewModel::dismissCoverPicker,
+            onEnterMountDirectory = viewModel::enterMountDirectory,
+            onLeaveMountDirectory = viewModel::leaveMountDirectory,
+            onSetMountMode = viewModel::setMountMode,
+            onConfirmMount = viewModel::confirmMount,
+            onCancelMount = viewModel::cancelMountSetup,
+            onCancelScan = viewModel::cancelScan,
+            onRefreshMount = viewModel::refreshMount,
+            onRequestReauthorize = { mountId ->
+                reauthorizeMountId = mountId
+                folderPicker.launch(null)
+            },
+            onRefreshAll = viewModel::refreshAll,
             onRemoveMount = viewModel::removeMount,
+            onRestoreAlbum = viewModel::restoreAlbum,
+            onClearCache = viewModel::clearImageCache,
+            onCancelOpen = viewModel::cancelOpenAlbum,
         )
 
         SnackbarHost(
