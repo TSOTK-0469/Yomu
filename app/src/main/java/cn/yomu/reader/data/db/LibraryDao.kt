@@ -24,6 +24,9 @@ interface LibraryDao {
     @Query("SELECT * FROM albums WHERE mountId = :mountId")
     suspend fun albumsForMount(mountId: String): List<AlbumEntity>
 
+    @Query("SELECT * FROM album_images WHERE albumId = :albumId ORDER BY position")
+    suspend fun imagesForAlbum(albumId: String): List<AlbumImageEntity>
+
     @Query("SELECT COUNT(*) FROM albums WHERE mountId = :mountId AND hidden = 0")
     suspend fun visibleAlbumCount(mountId: String): Int
 
@@ -41,12 +44,19 @@ interface LibraryDao {
 
     @Upsert suspend fun upsertMount(value: MountEntity)
     @Upsert suspend fun upsertAlbums(values: List<AlbumEntity>)
+    @Upsert suspend fun upsertAlbumImages(values: List<AlbumImageEntity>)
     @Upsert suspend fun upsertBookshelf(value: BookshelfEntity)
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertMemberships(values: List<AlbumBookshelfEntity>)
 
     @Delete suspend fun deleteAlbums(values: List<AlbumEntity>)
+
+    @Query("DELETE FROM album_images WHERE albumId IN (:albumIds)")
+    suspend fun deleteImagesForAlbums(albumIds: List<String>)
+
+    @Query("DELETE FROM album_images WHERE albumId = :albumId AND uri = :uri")
+    suspend fun deleteAlbumImage(albumId: String, uri: String)
 
     @Query("DELETE FROM mount_sources WHERE id = :id")
     suspend fun deleteMount(id: String)

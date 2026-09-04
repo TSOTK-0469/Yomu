@@ -72,6 +72,7 @@ private fun YomuApp(viewModel: MainViewModel) {
                 resolver = resolver,
                 onBack = viewModel::closeReader,
                 onProgress = { viewModel.saveProgress(album.id, it) },
+                onImageLoadFailed = { viewModel.imageLoadFailed(album.id, it) },
                 onPreferencesChange = viewModel::setReaderPreferences,
             )
         } ?: LibraryScreen(

@@ -75,6 +75,7 @@ import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import cn.yomu.reader.model.Album
+import cn.yomu.reader.model.ImageRef
 import cn.yomu.reader.model.ReaderPreferences
 import cn.yomu.reader.model.ReadingDirection
 import cn.yomu.reader.model.ReadingMode
@@ -89,16 +90,32 @@ fun ReaderScreen(
     resolver: ContentResolver,
     onBack: () -> Unit,
     onProgress: (Int) -> Unit,
+    onImageLoadFailed: (ImageRef) -> Unit,
     onPreferencesChange: (ReaderPreferences) -> Unit,
 ) {
     val activity = LocalActivity.current ?: return
     var chromeVisible by remember { mutableStateOf(true) }
     var currentPage by remember(album.id) { mutableIntStateOf(album.progress.coerceIn(0, album.images.lastIndex)) }
+    var currentImageUri by remember(album.id) { mutableStateOf(album.images[currentPage].uri) }
     var seekValue by remember { mutableFloatStateOf(currentPage.toFloat()) }
     var isSeeking by remember { mutableStateOf(false) }
     val pagerState = rememberPagerState(initialPage = currentPage) { album.images.size }
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = currentPage)
     val scope = rememberCoroutineScope()
+
+    LaunchedEffect(album.images, preferences.mode) {
+        val target = album.images.indexOfFirst { it.uri == currentImageUri }
+            .takeIf { it >= 0 }
+            ?: currentPage.coerceIn(0, album.images.lastIndex)
+        if (target != currentPage) {
+            currentPage = target
+            seekValue = target.toFloat()
+            onProgress(target)
+            if (preferences.mode == ReadingMode.PAGER) pagerState.scrollToPage(target)
+            else listState.scrollToItem(target)
+        }
+        currentImageUri = album.images[target].uri
+    }
 
     BackHandler(onBack = onBack)
 
@@ -127,6 +144,7 @@ fun ReaderScreen(
                 .distinctUntilChanged()
                 .collect { page ->
                     currentPage = page
+                    album.images.getOrNull(page)?.let { currentImageUri = it.uri }
                     if (!isSeeking) seekValue = page.toFloat()
                     onProgress(page)
                 }
@@ -135,6 +153,7 @@ fun ReaderScreen(
                 .distinctUntilChanged()
                 .collect { page ->
                     currentPage = page
+                    album.images.getOrNull(page)?.let { currentImageUri = it.uri }
                     if (!isSeeking) seekValue = page.toFloat()
                     onProgress(page)
                 }
@@ -153,12 +172,14 @@ fun ReaderScreen(
                 pagerState = pagerState,
                 direction = preferences.direction,
                 onToggleChrome = { chromeVisible = !chromeVisible },
+                onImageLoadFailed = onImageLoadFailed,
             )
             ReadingMode.WEBTOON -> WebtoonReader(
                 album = album,
                 resolver = resolver,
                 listState = listState,
                 onToggleChrome = { chromeVisible = !chromeVisible },
+                onImageLoadFailed = onImageLoadFailed,
             )
         }
 
@@ -212,6 +233,7 @@ private fun PagerReader(
     pagerState: androidx.compose.foundation.pager.PagerState,
     direction: ReadingDirection,
     onToggleChrome: () -> Unit,
+    onImageLoadFailed: (ImageRef) -> Unit,
 ) {
     var zoomed by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -231,6 +253,7 @@ private fun PagerReader(
             uri = album.images[page].uri,
             contentDescription = album.images[page].name,
             onZoomChanged = { if (page == pagerState.currentPage) zoomed = it },
+            onImageLoadFailed = { onImageLoadFailed(album.images[page]) },
             onTap = { fraction ->
                 when {
                     fraction in 0.34f..0.66f -> onToggleChrome()
@@ -254,6 +277,7 @@ private fun ZoomablePage(
     uri: String,
     contentDescription: String,
     onZoomChanged: (Boolean) -> Unit,
+    onImageLoadFailed: () -> Unit,
     onTap: (Float) -> Unit,
 ) {
     BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -312,6 +336,9 @@ private fun ZoomablePage(
                     },
             )
         }
+        LaunchedEffect(state, uri) {
+            if (state == BitmapLoadState.Failed) onImageLoadFailed()
+        }
     }
 }
 
@@ -321,6 +348,7 @@ private fun WebtoonReader(
     resolver: ContentResolver,
     listState: androidx.compose.foundation.lazy.LazyListState,
     onToggleChrome: () -> Unit,
+    onImageLoadFailed: (ImageRef) -> Unit,
 ) {
     BoxWithConstraints(Modifier.fillMaxSize()) {
         val targetWidth = with(LocalDensity.current) { maxWidth.roundToPx() }
@@ -336,6 +364,7 @@ private fun WebtoonReader(
                     name = "${index + 1}. ${image.name}",
                     targetWidth = targetWidth,
                     onTap = onToggleChrome,
+                    onImageLoadFailed = { onImageLoadFailed(image) },
                 )
             }
         }
@@ -349,6 +378,7 @@ private fun WebtoonPage(
     name: String,
     targetWidth: Int,
     onTap: () -> Unit,
+    onImageLoadFailed: () -> Unit,
 ) {
     val state by rememberBitmap(resolver, uri, targetWidth)
     when (val value = state) {
@@ -368,6 +398,9 @@ private fun WebtoonPage(
                 .fillMaxWidth()
                 .pointerInput(uri) { detectTapGestures(onTap = { onTap() }) },
         )
+    }
+    LaunchedEffect(state, uri) {
+        if (state == BitmapLoadState.Failed) onImageLoadFailed()
     }
 }
 

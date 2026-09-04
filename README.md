@@ -8,7 +8,8 @@ Yomu 是一个专注于本地图片的 Android 阅读器。
 - 挂载时可选择非递归或递归模式，并显示实时扫描进度
 - 内置子目录选择器，可以进入并单独挂载名称以 `.` 开头的隐藏文件夹
 - 每个“直接包含图片”的目录自动成为一册
-- Room 持久书库索引：启动时不再重新扫描，打开画册时才加载完整图片列表
+- Room 持久保存画册摘要和已排序的完整图片索引：启动和日常打开画册均不重新扫描
+- 从 0.2.0 升级后，旧画册首次打开时自动补全一次图片索引
 - 按挂载源独立刷新，刷新失败时保留上一次完整索引
 - “全部画册”和自建书架；画册可同时加入多个书架
 - 书架支持创建、重命名、删除和自定义封面
@@ -30,7 +31,7 @@ Yomu 是一个专注于本地图片的 Android 阅读器。
 2. 安装 Android SDK 37.1，并让 Gradle 使用 JDK 17。
 3. 等待 Gradle 同步后，运行 `app` 配置；或执行 `gradlew.bat assembleDebug`。
 
-调试 APK 会生成在 `app/build/outputs/apk/debug/app-debug.apk`。当前版本为 0.2.0。
+调试 APK 会生成在 `app/build/outputs/apk/debug/app-debug.apk`。当前版本为 0.2.1。
 
 ## 关于隐藏目录
 
@@ -40,7 +41,7 @@ Android 11 及以上不允许第三方应用通过目录选择器授权内部存
 
 ## 项目结构
 
-- `data/LibraryRepository.kt`：目录授权、按需扫描、书架操作与索引协调
+- `data/LibraryRepository.kt`：目录授权、挂载/刷新扫描、书架操作与索引协调
 - `data/db/`：Room 数据库、画册索引与多书架关系
 - `data/NaturalOrder.kt`：图片页码自然排序
 - `ui/LibraryScreen.kt`：书架侧栏、搜索、封面与挂载管理

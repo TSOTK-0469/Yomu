@@ -41,6 +41,24 @@ data class AlbumEntity(
     val updatedAt: Long,
 )
 
+@Entity(
+    tableName = "album_images",
+    primaryKeys = ["albumId", "uri"],
+    foreignKeys = [ForeignKey(
+        entity = AlbumEntity::class,
+        parentColumns = ["id"],
+        childColumns = ["albumId"],
+        onDelete = ForeignKey.CASCADE,
+    )],
+    indices = [Index("albumId"), Index(value = ["albumId", "position"], unique = true)],
+)
+data class AlbumImageEntity(
+    val albumId: String,
+    val uri: String,
+    val name: String,
+    val position: Int,
+)
+
 @Entity(tableName = "bookshelves", indices = [Index(value = ["name"], unique = true)])
 data class BookshelfEntity(
     @PrimaryKey val id: String,

@@ -45,6 +45,7 @@ data class Album(
     val path: String,
     val images: List<ImageRef>,
     val progress: Int,
+    val indexBackfilled: Boolean = false,
 )
 
 data class Bookshelf(

@@ -8,6 +8,7 @@ import android.provider.DocumentsContract
 import androidx.room.withTransaction
 import cn.yomu.reader.data.db.AlbumBookshelfEntity
 import cn.yomu.reader.data.db.AlbumEntity
+import cn.yomu.reader.data.db.AlbumImageEntity
 import cn.yomu.reader.data.db.BookshelfEntity
 import cn.yomu.reader.data.db.MountEntity
 import cn.yomu.reader.data.db.YomuDatabase
@@ -27,10 +28,13 @@ import cn.yomu.reader.model.ScanProgress
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import java.io.FileNotFoundException
 import java.security.MessageDigest
 import java.util.Locale
 import java.util.UUID
 import kotlin.coroutines.coroutineContext
+
+enum class MissingImageCheck { PRESENT_OR_UNREADABLE, REMOVED, ALBUM_REMOVED, SOURCE_UNAVAILABLE }
 
 class LibraryRepository(private val context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
@@ -161,11 +165,13 @@ class LibraryRepository(private val context: Context) {
         persistFolderPermission(Uri.parse(treeUri))
         try {
             val now = System.currentTimeMillis()
+            val albums = scanned.map { it.toEntity(now) }
             database.withTransaction {
                 dao.upsertMount(
                     MountEntity(mountId, treeUri, target.uri, target.name, mode.name, true, now),
                 )
-                dao.upsertAlbums(scanned.map { it.toEntity(now) })
+                dao.upsertAlbums(albums)
+                replaceAlbumImages(scanned)
             }
         } catch (error: Throwable) {
             releasePermission(treeUri)
@@ -207,6 +213,7 @@ class LibraryRepository(private val context: Context) {
                 database.withTransaction {
                     if (removed.isNotEmpty()) dao.deleteAlbums(removed)
                     if (replacements.isNotEmpty()) dao.upsertAlbums(replacements)
+                    replaceAlbumImages(scanned)
                     dao.setMountAvailable(mount.id, true)
                 }
             } catch (error: Throwable) {
@@ -266,6 +273,7 @@ class LibraryRepository(private val context: Context) {
                 )
                 if (removed.isNotEmpty()) dao.deleteAlbums(removed)
                 if (replacements.isNotEmpty()) dao.upsertAlbums(replacements)
+                replaceAlbumImages(scanned)
             }
             if (oldMount.treeUri != newTreeUri && dao.mounts().none { it.id != mountId && it.treeUri == oldMount.treeUri }) {
                 releasePermission(oldMount.treeUri)
@@ -278,49 +286,76 @@ class LibraryRepository(private val context: Context) {
 
     suspend fun openAlbum(albumId: String): Album = withContext(Dispatchers.IO) {
         val entity = dao.album(albumId) ?: error("画册不存在")
-        val mount = dao.mount(entity.mountId) ?: error("挂载源不存在")
-        try {
-            val images = listImages(Uri.parse(mount.treeUri), Uri.parse(entity.directoryUri))
-            if (images.isEmpty()) {
-                dao.deleteAlbums(listOf(entity))
-                throw EmptyAlbumException()
-            }
-            val uriSet = images.mapTo(hashSetOf(), ImageRef::uri)
-            val customCover = entity.customCoverUri?.takeIf { it in uriSet }
-            val resolvedProgress = LibraryRules.resolveReadingIndex(entity.lastReadUri, images)
-            val updated = entity.copy(
-                defaultCoverUri = images.first().uri,
-                customCoverUri = customCover,
-                pageCount = images.size,
-                lastReadUri = when {
-                    entity.lastReadUri == null -> null
-                    entity.lastReadUri in uriSet -> entity.lastReadUri
-                    else -> images.first().uri
-                },
-                lastReadIndex = if (entity.lastReadUri == null) -1 else resolvedProgress,
-                updatedAt = System.currentTimeMillis(),
-            )
-            database.withTransaction {
-                dao.upsertAlbums(listOf(updated))
-                dao.setMountAvailable(mount.id, true)
-            }
-            Album(entity.id, entity.mountId, entity.name, entity.path, images, resolvedProgress)
-        } catch (error: Throwable) {
-            if (error is kotlinx.coroutines.CancellationException || error is EmptyAlbumException) throw error
-            dao.setMountAvailable(mount.id, false)
-            throw error
-        }
+        val indexed = ensureImageIndex(entity)
+        val resolvedProgress = LibraryRules.resolveReadingIndex(entity.lastReadUri, indexed.images)
+        Album(
+            entity.id,
+            entity.mountId,
+            entity.name,
+            entity.path,
+            indexed.images,
+            resolvedProgress,
+            indexed.backfilled,
+        )
     }
 
     suspend fun albumImages(albumId: String): List<ImageRef> = withContext(Dispatchers.IO) {
         val album = dao.album(albumId) ?: return@withContext emptyList()
-        val mount = dao.mount(album.mountId) ?: return@withContext emptyList()
-        listImages(Uri.parse(mount.treeUri), Uri.parse(album.directoryUri))
+        ensureImageIndex(album).images
     }
 
     suspend fun saveProgress(albumId: String, image: ImageRef, index: Int) = withContext(Dispatchers.IO) {
         dao.saveReadingPosition(albumId, image.uri, index.coerceAtLeast(0))
     }
+
+    suspend fun removeImageIfMissing(albumId: String, imageUri: String): MissingImageCheck =
+        withContext(Dispatchers.IO) {
+            val album = dao.album(albumId) ?: return@withContext MissingImageCheck.ALBUM_REMOVED
+            val exists = try {
+                resolver.query(
+                    Uri.parse(imageUri),
+                    arrayOf(DocumentsContract.Document.COLUMN_DOCUMENT_ID),
+                    null,
+                    null,
+                    null,
+                )?.use { it.moveToFirst() } ?: false
+            } catch (_: SecurityException) {
+                dao.setMountAvailable(album.mountId, false)
+                return@withContext MissingImageCheck.SOURCE_UNAVAILABLE
+            } catch (_: FileNotFoundException) {
+                false
+            } catch (_: Throwable) {
+                return@withContext MissingImageCheck.PRESENT_OR_UNREADABLE
+            }
+            if (exists) return@withContext MissingImageCheck.PRESENT_OR_UNREADABLE
+
+            database.withTransaction {
+                dao.deleteAlbumImage(albumId, imageUri)
+                val remainingEntities = dao.imagesForAlbum(albumId)
+                if (remainingEntities.isEmpty()) {
+                    dao.deleteAlbums(listOf(album))
+                    return@withTransaction MissingImageCheck.ALBUM_REMOVED
+                }
+                val remaining = remainingEntities.map { ImageRef(it.uri, it.name) }
+                val remainingUris = remaining.mapTo(hashSetOf(), ImageRef::uri)
+                val nextReadUri = album.lastReadUri?.takeIf { it in remainingUris }
+                    ?: remaining.first().uri
+                dao.upsertAlbums(
+                    listOf(
+                        album.copy(
+                            defaultCoverUri = album.defaultCoverUri.takeIf { it in remainingUris }
+                                ?: remaining.first().uri,
+                            customCoverUri = album.customCoverUri?.takeIf { it in remainingUris },
+                            pageCount = remaining.size,
+                            lastReadUri = nextReadUri,
+                            lastReadIndex = remaining.indexOfFirst { it.uri == nextReadUri },
+                            updatedAt = System.currentTimeMillis(),
+                        ),
+                    ),
+                )
+                MissingImageCheck.REMOVED
+            }
+        }
 
     suspend fun setAlbumCover(albumId: String, uri: String?) = withContext(Dispatchers.IO) {
         val validUri = uri?.takeIf { candidate -> albumImages(albumId).any { it.uri == candidate } }
@@ -426,6 +461,54 @@ class LibraryRepository(private val context: Context) {
                 require(!overlaps) { "这个目录与“${existing.name}”存在父子重叠" }
             }
         }
+    }
+
+    private suspend fun ensureImageIndex(album: AlbumEntity): IndexedImages {
+        val stored = dao.imagesForAlbum(album.id)
+            .map { ImageRef(it.uri, it.name) }
+        if (stored.isNotEmpty()) return IndexedImages(stored, backfilled = false)
+
+        val mount = dao.mount(album.mountId) ?: error("挂载源不存在")
+        try {
+            val images = listImages(Uri.parse(mount.treeUri), Uri.parse(album.directoryUri))
+            if (images.isEmpty()) {
+                dao.deleteAlbums(listOf(album))
+                throw EmptyAlbumException()
+            }
+            val uriSet = images.mapTo(hashSetOf(), ImageRef::uri)
+            val resolvedProgress = LibraryRules.resolveReadingIndex(album.lastReadUri, images)
+            val updated = album.copy(
+                defaultCoverUri = images.first().uri,
+                customCoverUri = album.customCoverUri?.takeIf { it in uriSet },
+                pageCount = images.size,
+                lastReadUri = when {
+                    album.lastReadUri == null -> null
+                    album.lastReadUri in uriSet -> album.lastReadUri
+                    else -> images.first().uri
+                },
+                lastReadIndex = if (album.lastReadUri == null) -1 else resolvedProgress,
+                updatedAt = System.currentTimeMillis(),
+            )
+            database.withTransaction {
+                dao.upsertAlbums(listOf(updated))
+                dao.upsertAlbumImages(images.mapIndexed { index, image ->
+                    AlbumImageEntity(album.id, image.uri, image.name, index)
+                })
+                dao.setMountAvailable(mount.id, true)
+            }
+            return IndexedImages(images, backfilled = true)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException || error is EmptyAlbumException) throw error
+            dao.setMountAvailable(mount.id, false)
+            throw error
+        }
+    }
+
+    private suspend fun replaceAlbumImages(scanned: List<ScannedAlbum>) {
+        if (scanned.isEmpty()) return
+        val albumIds = scanned.map(ScannedAlbum::id)
+        dao.deleteImagesForAlbums(albumIds)
+        dao.upsertAlbumImages(scanned.flatMap(ScannedAlbum::toImageEntities))
     }
 
     private suspend fun scan(
@@ -548,6 +631,8 @@ class LibraryRepository(private val context: Context) {
 
     private data class SafEntry(val uri: String, val name: String, val isDirectory: Boolean, val isImage: Boolean)
 
+    private data class IndexedImages(val images: List<ImageRef>, val backfilled: Boolean)
+
     private class EmptyAlbumException : IllegalStateException("这个画册已经没有图片")
 
     private data class ScannedAlbum(
@@ -572,6 +657,10 @@ class LibraryRepository(private val context: Context) {
             hidden = false,
             updatedAt = now,
         )
+
+        fun toImageEntities(): List<AlbumImageEntity> = images.mapIndexed { index, image ->
+            AlbumImageEntity(id, image.uri, image.name, index)
+        }
     }
 
     private companion object {

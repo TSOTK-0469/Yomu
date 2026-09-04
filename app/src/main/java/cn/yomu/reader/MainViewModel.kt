@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cn.yomu.reader.data.LibraryRepository
+import cn.yomu.reader.data.MissingImageCheck
 import cn.yomu.reader.model.ALL_BOOKSHELF_ID
 import cn.yomu.reader.model.Album
 import cn.yomu.reader.model.AlbumSummary
@@ -46,6 +47,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val repository = LibraryRepository(application)
     private var workJob: Job? = null
     private var latestPosition: Triple<String, ImageRef, Int>? = null
+    private val checkedImageFailures = mutableSetOf<String>()
     private val _state = MutableStateFlow(
         MainUiState(readerPreferences = repository.readerPreferences()),
     )
@@ -240,7 +242,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(openingAlbum = album) }
             try {
                 val detail = repository.openAlbum(album.id)
-                _state.update { it.copy(openAlbum = detail, openingAlbum = null) }
+                _state.update {
+                    it.copy(
+                        openAlbum = detail,
+                        openingAlbum = null,
+                        message = if (detail.indexBackfilled) "画册索引已补全，之后打开将直接加载" else it.message,
+                    )
+                }
             } catch (_: CancellationException) {
                 _state.update { it.copy(openingAlbum = null) }
             } catch (error: Throwable) {
@@ -258,6 +266,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun closeReader() {
         _state.update { it.copy(openAlbum = null) }
+        checkedImageFailures.clear()
         val pending = latestPosition
         latestPosition = null
         viewModelScope.launch {
@@ -271,6 +280,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val image = album.images.getOrNull(page) ?: return
         latestPosition = Triple(albumId, image, page)
         viewModelScope.launch { repository.saveProgress(albumId, image, page) }
+    }
+
+    fun imageLoadFailed(albumId: String, image: ImageRef) {
+        val checkKey = "$albumId|${image.uri}"
+        if (!checkedImageFailures.add(checkKey)) return
+        viewModelScope.launch {
+            when (repository.removeImageIfMissing(albumId, image.uri)) {
+                MissingImageCheck.PRESENT_OR_UNREADABLE -> Unit
+                MissingImageCheck.REMOVED -> {
+                    if (latestPosition?.second?.uri == image.uri) latestPosition = null
+                    _state.update { state ->
+                        val current = state.openAlbum?.takeIf { it.id == albumId }
+                        val remaining = current?.images?.filterNot { it.uri == image.uri }.orEmpty()
+                        state.copy(
+                            openAlbum = current?.copy(
+                                images = remaining,
+                                progress = current.progress.coerceAtMost(remaining.lastIndex),
+                            ) ?: state.openAlbum,
+                            message = "图片已从设备移除，已跳过；刷新挂载源可同步其他变更",
+                        )
+                    }
+                    reload()
+                }
+                MissingImageCheck.ALBUM_REMOVED -> {
+                    latestPosition = null
+                    _state.update {
+                        it.copy(openAlbum = null, message = "画册已无可用图片，已从书库移除")
+                    }
+                    reload()
+                }
+                MissingImageCheck.SOURCE_UNAVAILABLE -> {
+                    _state.update { it.copy(message = "挂载源暂时无法访问，请在挂载管理中重新授权") }
+                    reload()
+                }
+            }
+        }
     }
 
     fun showAlbumCoverPicker(album: AlbumSummary) {
