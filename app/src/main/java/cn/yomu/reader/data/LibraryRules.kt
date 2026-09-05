@@ -4,6 +4,12 @@ import cn.yomu.reader.model.ImageRef
 import java.util.Locale
 
 object LibraryRules {
+    fun normalizeAlbumDisplayName(rawName: String?, sourceName: String): String? {
+        val name = rawName?.trim().orEmpty()
+        require(name.length <= 100) { "画册名称不能超过 100 个字符" }
+        return name.takeIf { it.isNotEmpty() && it != sourceName }
+    }
+
     fun validateBookshelfName(rawName: String, existingNames: Collection<String>): String {
         val name = rawName.trim()
         require(name.isNotEmpty()) { "书架名称不能为空" }

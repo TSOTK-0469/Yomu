@@ -17,6 +17,7 @@ import cn.yomu.reader.model.Album
 import cn.yomu.reader.model.AlbumSummary
 import cn.yomu.reader.model.Bookshelf
 import cn.yomu.reader.model.DirectoryChoice
+import cn.yomu.reader.model.GridDensity
 import cn.yomu.reader.model.ImageRef
 import cn.yomu.reader.model.LibrarySnapshot
 import cn.yomu.reader.model.MountMode
@@ -106,10 +107,13 @@ class LibraryRepository(private val context: Context) {
                 treeUri = mount.treeUri,
                 uri = mount.directoryUri,
                 name = mount.name,
+                path = mount.path.ifBlank { mount.name },
                 mode = runCatching { MountMode.valueOf(mount.mode) }.getOrDefault(MountMode.RECURSIVE),
                 available = mount.available,
                 albumCount = owned.size,
                 hiddenCount = owned.count(AlbumSummary::hidden),
+                lastSuccessfulRefreshAt = mount.lastSuccessfulRefreshAt,
+                lastRefreshFailed = mount.lastRefreshFailed,
             )
         }
         LibrarySnapshot(
@@ -168,7 +172,18 @@ class LibraryRepository(private val context: Context) {
             val albums = scanned.map { it.toEntity(now) }
             database.withTransaction {
                 dao.upsertMount(
-                    MountEntity(mountId, treeUri, target.uri, target.name, mode.name, true, now),
+                    MountEntity(
+                        mountId,
+                        treeUri,
+                        target.uri,
+                        target.name,
+                        target.path,
+                        mode.name,
+                        true,
+                        now,
+                        now,
+                        false,
+                    ),
                 )
                 dao.upsertAlbums(albums)
                 replaceAlbumImages(scanned)
@@ -194,6 +209,7 @@ class LibraryRepository(private val context: Context) {
                     val oldRead = old?.lastReadUri
                     val readStillExists = oldRead != null && oldRead in imageUris
                     item.toEntity(now).copy(
+                        customName = old?.customName,
                         customCoverUri = custom,
                         lastReadUri = when {
                             oldRead == null -> null
@@ -214,11 +230,11 @@ class LibraryRepository(private val context: Context) {
                     if (removed.isNotEmpty()) dao.deleteAlbums(removed)
                     if (replacements.isNotEmpty()) dao.upsertAlbums(replacements)
                     replaceAlbumImages(scanned)
-                    dao.setMountAvailable(mount.id, true)
+                    dao.markMountRefreshSuccess(mount.id, now)
                 }
             } catch (error: Throwable) {
                 if (error is kotlinx.coroutines.CancellationException) throw error
-                dao.setMountAvailable(mount.id, false)
+                dao.markMountRefreshFailed(mount.id)
                 throw error
             }
         }
@@ -235,14 +251,20 @@ class LibraryRepository(private val context: Context) {
         val targetId = oldTargetId?.takeIf { it == newRootId || it.startsWith("$newRootId/") } ?: newRootId
         val newTargetUri = DocumentsContract.buildDocumentUriUsingTree(newTree, targetId)
         val newName = queryDocumentName(newTargetUri) ?: oldMount.name
-        val scanned = scan(
-            mountId,
-            newTreeUri,
-            newTargetUri.toString(),
-            newName,
-            runCatching { MountMode.valueOf(oldMount.mode) }.getOrDefault(MountMode.RECURSIVE),
-            onProgress,
-        )
+        val scanned = try {
+            scan(
+                mountId,
+                newTreeUri,
+                newTargetUri.toString(),
+                newName,
+                runCatching { MountMode.valueOf(oldMount.mode) }.getOrDefault(MountMode.RECURSIVE),
+                onProgress,
+            )
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            dao.markMountRefreshFailed(mountId)
+            throw error
+        }
         persistFolderPermission(newTree)
         try {
             val existing = dao.albumsForMount(mountId).associateBy(AlbumEntity::id)
@@ -251,6 +273,7 @@ class LibraryRepository(private val context: Context) {
                 val old = existing[item.id]
                 val imageUris = item.images.mapTo(hashSetOf(), ImageRef::uri)
                 item.toEntity(now).copy(
+                    customName = old?.customName,
                     customCoverUri = old?.customCoverUri?.takeIf { it in imageUris },
                     lastReadUri = old?.lastReadUri?.takeIf { it in imageUris }
                         ?: old?.lastReadUri?.let { item.images.first().uri },
@@ -268,7 +291,10 @@ class LibraryRepository(private val context: Context) {
                         treeUri = newTreeUri,
                         directoryUri = newTargetUri.toString(),
                         name = newName,
+                        path = oldMount.path.ifBlank { newName },
                         available = true,
+                        lastSuccessfulRefreshAt = now,
+                        lastRefreshFailed = false,
                     ),
                 )
                 if (removed.isNotEmpty()) dao.deleteAlbums(removed)
@@ -280,18 +306,22 @@ class LibraryRepository(private val context: Context) {
             }
         } catch (error: Throwable) {
             if (newTreeUri != oldMount.treeUri) releasePermission(newTreeUri)
+            if (error !is kotlinx.coroutines.CancellationException) dao.markMountRefreshFailed(mountId)
             throw error
         }
     }
 
-    suspend fun openAlbum(albumId: String): Album = withContext(Dispatchers.IO) {
+    suspend fun openAlbum(
+        albumId: String,
+        onIndexBackfill: () -> Unit = {},
+    ): Album = withContext(Dispatchers.IO) {
         val entity = dao.album(albumId) ?: error("画册不存在")
-        val indexed = ensureImageIndex(entity)
+        val indexed = ensureImageIndex(entity, onIndexBackfill)
         val resolvedProgress = LibraryRules.resolveReadingIndex(entity.lastReadUri, indexed.images)
         Album(
             entity.id,
             entity.mountId,
-            entity.name,
+            entity.customName ?: entity.name,
             entity.path,
             indexed.images,
             resolvedProgress,
@@ -360,6 +390,12 @@ class LibraryRepository(private val context: Context) {
     suspend fun setAlbumCover(albumId: String, uri: String?) = withContext(Dispatchers.IO) {
         val validUri = uri?.takeIf { candidate -> albumImages(albumId).any { it.uri == candidate } }
         dao.setAlbumCover(albumId, validUri, System.currentTimeMillis())
+    }
+
+    suspend fun renameAlbum(albumId: String, rawName: String?) = withContext(Dispatchers.IO) {
+        val album = dao.album(albumId) ?: error("画册不存在")
+        val customName = LibraryRules.normalizeAlbumDisplayName(rawName, album.name)
+        dao.setAlbumCustomName(albumId, customName, System.currentTimeMillis())
     }
 
     suspend fun repairAlbumCover(albumId: String, uri: String) = withContext(Dispatchers.IO) {
@@ -444,6 +480,14 @@ class LibraryRepository(private val context: Context) {
             .apply()
     }
 
+    fun gridDensity(): GridDensity = runCatching {
+        GridDensity.valueOf(preferences.getString(KEY_GRID_DENSITY, null).orEmpty())
+    }.getOrDefault(GridDensity.STANDARD)
+
+    fun saveGridDensity(value: GridDensity) {
+        preferences.edit().putString(KEY_GRID_DENSITY, value.name).apply()
+    }
+
     private suspend fun validateBookshelfName(rawName: String, currentId: String?): String {
         val existingNames = dao.bookshelves().filter { it.id != currentId }.map(BookshelfEntity::name)
         return LibraryRules.validateBookshelfName(rawName, existingNames)
@@ -463,11 +507,15 @@ class LibraryRepository(private val context: Context) {
         }
     }
 
-    private suspend fun ensureImageIndex(album: AlbumEntity): IndexedImages {
+    private suspend fun ensureImageIndex(
+        album: AlbumEntity,
+        onIndexBackfill: () -> Unit = {},
+    ): IndexedImages {
         val stored = dao.imagesForAlbum(album.id)
             .map { ImageRef(it.uri, it.name) }
         if (stored.isNotEmpty()) return IndexedImages(stored, backfilled = false)
 
+        onIndexBackfill()
         val mount = dao.mount(album.mountId) ?: error("挂载源不存在")
         try {
             val images = listImages(Uri.parse(mount.treeUri), Uri.parse(album.directoryUri))
@@ -617,7 +665,8 @@ class LibraryRepository(private val context: Context) {
     private fun AlbumEntity.toSummary(shelfIds: Set<String>) = AlbumSummary(
         id = id,
         mountId = mountId,
-        name = name,
+        name = customName ?: name,
+        sourceName = name,
         path = path,
         directoryUri = directoryUri,
         coverUri = customCoverUri ?: defaultCoverUri,
@@ -648,6 +697,7 @@ class LibraryRepository(private val context: Context) {
             mountId = mountId,
             directoryUri = directoryUri,
             name = name,
+            customName = null,
             path = path,
             defaultCoverUri = images.first().uri,
             customCoverUri = null,
@@ -670,6 +720,7 @@ class LibraryRepository(private val context: Context) {
         const val KEY_CURRENT_SHELF = "current_bookshelf"
         const val KEY_READING_MODE = "reading_mode"
         const val KEY_READING_DIRECTION = "reading_direction"
+        const val KEY_GRID_DENSITY = "grid_density"
         val IMAGE_EXTENSIONS = setOf("jpg", "jpeg", "png", "webp", "gif", "bmp", "heic", "heif", "avif")
         val albumComparator = Comparator<AlbumSummary> { first, second ->
             NaturalOrder.compare(first.name, second.name).takeIf { it != 0 }

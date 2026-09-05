@@ -29,6 +29,7 @@ sealed interface BitmapLoadState {
 }
 
 object LocalImageLoader {
+    const val DISK_BUDGET_BYTES = 256L * 1024L * 1024L
     private val memoryBudget = (Runtime.getRuntime().maxMemory() / 8L)
         .coerceIn(32L * MIB, 128L * MIB)
         .toInt()
@@ -78,6 +79,10 @@ object LocalImageLoader {
         cacheDirectory(context).deleteRecursively()
     }
 
+    suspend fun diskCacheBytes(context: Context): Long = withContext(Dispatchers.IO) {
+        cacheDirectory(context).listFiles()?.filter(File::isFile)?.sumOf(File::length) ?: 0L
+    }
+
     private fun writeThumbnail(file: File, bitmap: Bitmap) {
         runCatching {
             file.parentFile?.mkdirs()
@@ -93,7 +98,7 @@ object LocalImageLoader {
         val files = directory.listFiles()?.filter(File::isFile)?.sortedBy(File::lastModified) ?: return
         var total = files.sumOf(File::length)
         for (file in files) {
-            if (total <= DISK_BUDGET) break
+            if (total <= DISK_BUDGET_BYTES) break
             val length = file.length()
             if (file.delete()) total -= length
         }
@@ -168,7 +173,6 @@ object LocalImageLoader {
     }
 
     private const val MIB = 1024L * 1024L
-    private const val DISK_BUDGET = 256L * MIB
     private const val MAX_DECODE_PIXELS = 16_000_000L
 }
 

@@ -11,9 +11,12 @@ data class MountEntity(
     val treeUri: String,
     val directoryUri: String,
     val name: String,
+    val path: String,
     val mode: String,
     val available: Boolean,
     val createdAt: Long,
+    val lastSuccessfulRefreshAt: Long?,
+    val lastRefreshFailed: Boolean,
 )
 
 @Entity(
@@ -31,6 +34,7 @@ data class AlbumEntity(
     val mountId: String,
     val directoryUri: String,
     val name: String,
+    val customName: String?,
     val path: String,
     val defaultCoverUri: String,
     val customCoverUri: String?,

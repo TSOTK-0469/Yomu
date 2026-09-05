@@ -76,6 +76,9 @@ interface LibraryDao {
     @Query("UPDATE albums SET customCoverUri = :uri, updatedAt = :updatedAt WHERE id = :albumId")
     suspend fun setAlbumCover(albumId: String, uri: String?, updatedAt: Long)
 
+    @Query("UPDATE albums SET customName = :name, updatedAt = :updatedAt WHERE id = :albumId")
+    suspend fun setAlbumCustomName(albumId: String, name: String?, updatedAt: Long)
+
     @Query("UPDATE albums SET defaultCoverUri = :uri, customCoverUri = NULL, updatedAt = :updatedAt WHERE id = :albumId")
     suspend fun repairAlbumCover(albumId: String, uri: String, updatedAt: Long)
 
@@ -84,4 +87,10 @@ interface LibraryDao {
 
     @Query("UPDATE mount_sources SET available = :available WHERE id = :mountId")
     suspend fun setMountAvailable(mountId: String, available: Boolean)
+
+    @Query("UPDATE mount_sources SET available = 1, lastSuccessfulRefreshAt = :refreshedAt, lastRefreshFailed = 0 WHERE id = :mountId")
+    suspend fun markMountRefreshSuccess(mountId: String, refreshedAt: Long)
+
+    @Query("UPDATE mount_sources SET available = 0, lastRefreshFailed = 1 WHERE id = :mountId")
+    suspend fun markMountRefreshFailed(mountId: String)
 }

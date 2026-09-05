@@ -83,6 +83,9 @@ private fun YomuApp(viewModel: MainViewModel) {
             scanProgress = state.scanProgress,
             scanTitle = state.scanTitle,
             openingAlbum = state.openingAlbum,
+            openingFeedback = state.openingFeedback,
+            gridDensity = state.gridDensity,
+            diskCacheBytes = state.diskCacheBytes,
             coverPicker = state.coverPicker,
             onPickFolder = {
                 reauthorizeMountId = null
@@ -94,6 +97,7 @@ private fun YomuApp(viewModel: MainViewModel) {
             onDeleteBookshelf = viewModel::deleteBookshelf,
             onSetBookshelfCover = viewModel::setBookshelfCover,
             onOpenAlbum = viewModel::open,
+            onRenameAlbum = viewModel::renameAlbum,
             onSetAlbumBookshelves = viewModel::setAlbumBookshelves,
             onRemoveFromCurrentBookshelf = viewModel::removeFromCurrentBookshelf,
             onHideAlbum = viewModel::hideAlbum,
@@ -116,6 +120,7 @@ private fun YomuApp(viewModel: MainViewModel) {
             onRemoveMount = viewModel::removeMount,
             onRestoreAlbum = viewModel::restoreAlbum,
             onClearCache = viewModel::clearImageCache,
+            onGridDensityChange = viewModel::setGridDensity,
             onCancelOpen = viewModel::cancelOpenAlbum,
         )
 

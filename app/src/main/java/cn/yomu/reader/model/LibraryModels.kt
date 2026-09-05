@@ -5,16 +5,21 @@ const val ALL_BOOKSHELF_ID = "__all_albums__"
 enum class ReadingMode { PAGER, WEBTOON }
 enum class ReadingDirection { LEFT_TO_RIGHT, RIGHT_TO_LEFT }
 enum class MountMode { NON_RECURSIVE, RECURSIVE }
+enum class GridDensity { COMFORTABLE, STANDARD, COMPACT }
+enum class AlbumOpenFeedback { NONE, CARD, INDEX_BACKFILL }
 
 data class MountedFolder(
     val id: String,
     val treeUri: String,
     val uri: String,
     val name: String,
+    val path: String,
     val mode: MountMode,
     val available: Boolean,
     val albumCount: Int,
     val hiddenCount: Int,
+    val lastSuccessfulRefreshAt: Long?,
+    val lastRefreshFailed: Boolean,
 )
 
 data class ImageRef(val uri: String, val name: String)
@@ -23,6 +28,7 @@ data class AlbumSummary(
     val id: String,
     val mountId: String,
     val name: String,
+    val sourceName: String,
     val path: String,
     val directoryUri: String,
     val coverUri: String,

@@ -6,9 +6,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import cn.yomu.reader.data.LibraryRepository
 import cn.yomu.reader.data.MissingImageCheck
+import cn.yomu.reader.data.AlbumOpenFeedbackPolicy
 import cn.yomu.reader.model.ALL_BOOKSHELF_ID
 import cn.yomu.reader.model.Album
+import cn.yomu.reader.model.AlbumOpenFeedback
 import cn.yomu.reader.model.AlbumSummary
+import cn.yomu.reader.model.GridDensity
 import cn.yomu.reader.model.ImageRef
 import cn.yomu.reader.model.LibrarySnapshot
 import cn.yomu.reader.model.MountBrowserState
@@ -18,6 +21,7 @@ import cn.yomu.reader.model.ScanProgress
 import cn.yomu.reader.ui.LocalImageLoader
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -38,8 +42,11 @@ data class MainUiState(
     val mountBrowser: MountBrowserState? = null,
     val openAlbum: Album? = null,
     val openingAlbum: AlbumSummary? = null,
+    val openingFeedback: AlbumOpenFeedback = AlbumOpenFeedback.NONE,
     val coverPicker: CoverPickerState? = null,
     val readerPreferences: ReaderPreferences = ReaderPreferences(),
+    val gridDensity: GridDensity = GridDensity.STANDARD,
+    val diskCacheBytes: Long = 0L,
     val message: String? = null,
 )
 
@@ -49,7 +56,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var latestPosition: Triple<String, ImageRef, Int>? = null
     private val checkedImageFailures = mutableSetOf<String>()
     private val _state = MutableStateFlow(
-        MainUiState(readerPreferences = repository.readerPreferences()),
+        MainUiState(
+            readerPreferences = repository.readerPreferences(),
+            gridDensity = repository.gridDensity(),
+        ),
     )
     val state: StateFlow<MainUiState> = _state.asStateFlow()
 
@@ -57,6 +67,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             repository.initialize()
             reload()
+            refreshCacheUsage()
             _state.update { it.copy(initializing = false) }
         }
     }
@@ -172,6 +183,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun selectBookshelf(id: String) = viewModelScope.launch {
+        cancelOpenAlbum()
         repository.saveCurrentShelf(id)
         reload(id)
     }.let { Unit }
@@ -190,6 +202,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setAlbumBookshelves(albumId: String, shelfIds: Set<String>) = mutate("所属书架已更新") {
         repository.setAlbumBookshelves(albumId, shelfIds)
+    }
+
+    fun renameAlbum(albumId: String, name: String?) = mutate("画册名称已更新") {
+        repository.renameAlbum(albumId, name)
     }
 
     fun removeFromCurrentBookshelf(albumId: String) {
@@ -237,31 +253,50 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun open(album: AlbumSummary) {
+        if (_state.value.openingAlbum != null) return
         workJob?.cancel()
         workJob = viewModelScope.launch {
-            _state.update { it.copy(openingAlbum = album) }
+            _state.update { it.copy(openingAlbum = album, openingFeedback = AlbumOpenFeedback.NONE) }
+            val feedbackJob = launch {
+                delay(AlbumOpenFeedbackPolicy.DELAY_MILLIS)
+                _state.update { state ->
+                    if (state.openingAlbum?.id == album.id && state.openingFeedback == AlbumOpenFeedback.NONE) {
+                        state.copy(openingFeedback = AlbumOpenFeedbackPolicy.feedback(AlbumOpenFeedbackPolicy.DELAY_MILLIS))
+                    } else state
+                }
+            }
             try {
-                val detail = repository.openAlbum(album.id)
+                val detail = repository.openAlbum(album.id) {
+                    feedbackJob.cancel()
+                    _state.update { state ->
+                        if (state.openingAlbum?.id == album.id) {
+                            state.copy(openingFeedback = AlbumOpenFeedbackPolicy.feedback(0, indexBackfill = true))
+                        } else state
+                    }
+                }
                 _state.update {
                     it.copy(
                         openAlbum = detail,
                         openingAlbum = null,
+                        openingFeedback = AlbumOpenFeedback.NONE,
                         message = if (detail.indexBackfilled) "画册索引已补全，之后打开将直接加载" else it.message,
                     )
                 }
             } catch (_: CancellationException) {
-                _state.update { it.copy(openingAlbum = null) }
+                _state.update { it.copy(openingAlbum = null, openingFeedback = AlbumOpenFeedback.NONE) }
             } catch (error: Throwable) {
                 reload()
-                _state.update { it.copy(openingAlbum = null) }
+                _state.update { it.copy(openingAlbum = null, openingFeedback = AlbumOpenFeedback.NONE) }
                 showError(error, "无法打开画册")
+            } finally {
+                feedbackJob.cancel()
             }
         }
     }
 
     fun cancelOpenAlbum() {
         workJob?.cancel()
-        _state.update { it.copy(openingAlbum = null) }
+        _state.update { it.copy(openingAlbum = null, openingFeedback = AlbumOpenFeedback.NONE) }
     }
 
     fun closeReader() {
@@ -370,12 +405,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _state.update { it.copy(readerPreferences = value) }
     }
 
+    fun setGridDensity(value: GridDensity) {
+        repository.saveGridDensity(value)
+        _state.update { it.copy(gridDensity = value) }
+    }
+
     fun consumeMessage() = _state.update { it.copy(message = null) }
 
     fun clearImageCache() {
         viewModelScope.launch {
             LocalImageLoader.clear(getApplication())
-            _state.update { it.copy(message = "图片缓存已清除") }
+            _state.update { it.copy(message = "图片缓存已清除", diskCacheBytes = 0L) }
+        }
+    }
+
+    private fun refreshCacheUsage() {
+        viewModelScope.launch {
+            val bytes = LocalImageLoader.diskCacheBytes(getApplication())
+            _state.update { it.copy(diskCacheBytes = bytes) }
         }
     }
 
