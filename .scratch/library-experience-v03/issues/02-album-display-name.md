@@ -18,3 +18,5 @@ Albums have no rename action. The existing name is the source directory name and
 ## Answer
 
 Added an optional Room-backed display name, rename and restore actions, display-name sorting, and search across display name, source name, and path. Refresh and reauthorization retain the custom name without modifying the source directory.
+
+- Beta follow-up: the rename field now preserves its cursor selection and opens at the end of long names so horizontal cursor tracking works correctly.

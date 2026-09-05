@@ -101,7 +101,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -180,7 +182,7 @@ fun LibraryScreen(
     var query by remember { mutableStateOf("") }
     var selectedAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
     var renamingAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
-    var albumName by remember { mutableStateOf("") }
+    var albumName by remember { mutableStateOf(TextFieldValue()) }
     var membershipAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
     var selectedMemberships by remember { mutableStateOf<Set<String>>(emptySet()) }
     var shelfMenu by remember { mutableStateOf<Bookshelf?>(null) }
@@ -405,7 +407,7 @@ fun LibraryScreen(
                 leadingContent = { Icon(Icons.Outlined.Edit, null) },
                 modifier = Modifier.combinedClickable(onClick = {
                     renamingAlbum = album
-                    albumName = album.name
+                    albumName = albumRenameFieldValue(album.name)
                     selectedAlbum = null
                 }),
             )
@@ -459,7 +461,8 @@ fun LibraryScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                     OutlinedTextField(
                         value = albumName,
-                        onValueChange = { if (it.length <= 100) albumName = it },
+                        onValueChange = { if (it.text.length <= 100) albumName = it },
+                        modifier = Modifier.fillMaxWidth(),
                         label = { Text("显示名称") },
                         supportingText = { Text("留空会恢复来源名称，不会改动设备文件夹。") },
                         singleLine = true,
@@ -468,7 +471,7 @@ fun LibraryScreen(
             },
             confirmButton = {
                 TextButton(onClick = {
-                    onRenameAlbum(album.id, albumName)
+                    onRenameAlbum(album.id, albumName.text)
                     renamingAlbum = null
                 }) { Text("保存") }
             },
@@ -798,13 +801,13 @@ private fun AlbumGrid(
     ) {
         items(albums, key = AlbumSummary::id) { album ->
             Column(
-                Modifier.clip(RoundedCornerShape(18.dp)).combinedClickable(
+                Modifier.combinedClickable(
                     onClick = { onOpenAlbum(album) },
                     onLongClick = { onLongPress(album) },
                 ),
             ) {
                 Box(
-                    Modifier.fillMaxWidth().aspectRatio(154f / 214f).clip(RoundedCornerShape(18.dp))
+                    Modifier.fillMaxWidth().aspectRatio(154f / 214f)
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                 ) {
                     Thumbnail(
@@ -1160,6 +1163,11 @@ private fun middleEllipsis(value: String, maxLength: Int = 60): String {
     val side = (maxLength - 1) / 2
     return value.take(side) + "…" + value.takeLast(side)
 }
+
+internal fun albumRenameFieldValue(name: String) = TextFieldValue(
+    text = name,
+    selection = TextRange(name.length),
+)
 
 @Composable
 private fun MountBrowser(

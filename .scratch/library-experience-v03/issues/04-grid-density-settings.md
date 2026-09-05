@@ -22,3 +22,5 @@ The home grid normally produces two columns on a phone because it combines a 154
 ## Answer
 
 Added a full-screen Settings destination with immediate, persistent Comfortable/Standard/Compact adaptive grid previews, proportional covers, density-specific metadata, disk-cache usage and clearing, and the current app version.
+
+- Beta follow-up: Album covers and metadata are no longer enclosed by rounded clipping containers, preventing corner content from being hidden.
