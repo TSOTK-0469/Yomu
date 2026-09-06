@@ -8,6 +8,11 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.input.InputTransformation
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
+import androidx.compose.foundation.text.input.maxLength
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -103,7 +108,6 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.foundation.isSystemInDarkTheme
@@ -182,7 +186,6 @@ fun LibraryScreen(
     var query by remember { mutableStateOf("") }
     var selectedAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
     var renamingAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
-    var albumName by remember { mutableStateOf(TextFieldValue()) }
     var membershipAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
     var selectedMemberships by remember { mutableStateOf<Set<String>>(emptySet()) }
     var shelfMenu by remember { mutableStateOf<Bookshelf?>(null) }
@@ -407,7 +410,6 @@ fun LibraryScreen(
                 leadingContent = { Icon(Icons.Outlined.Edit, null) },
                 modifier = Modifier.combinedClickable(onClick = {
                     renamingAlbum = album
-                    albumName = albumRenameFieldValue(album.name)
                     selectedAlbum = null
                 }),
             )
@@ -452,37 +454,16 @@ fun LibraryScreen(
     }
 
     renamingAlbum?.let { album ->
-        AlertDialog(
-            onDismissRequest = { renamingAlbum = null },
-            title = { Text("重命名画册") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("来源名称：${album.sourceName}", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    OutlinedTextField(
-                        value = albumName,
-                        onValueChange = { if (it.text.length <= 100) albumName = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("显示名称") },
-                        supportingText = { Text("留空会恢复来源名称，不会改动设备文件夹。") },
-                        singleLine = true,
-                    )
-                }
+        AlbumRenameDialog(
+            album = album,
+            onDismiss = { renamingAlbum = null },
+            onSave = { name ->
+                onRenameAlbum(album.id, name)
+                renamingAlbum = null
             },
-            confirmButton = {
-                TextButton(onClick = {
-                    onRenameAlbum(album.id, albumName.text)
-                    renamingAlbum = null
-                }) { Text("保存") }
-            },
-            dismissButton = {
-                Row {
-                    TextButton(onClick = {
-                        onRenameAlbum(album.id, null)
-                        renamingAlbum = null
-                    }) { Text("恢复来源名称") }
-                    TextButton(onClick = { renamingAlbum = null }) { Text("取消") }
-                }
+            onRestore = {
+                onRenameAlbum(album.id, null)
+                renamingAlbum = null
             },
         )
     }
@@ -524,7 +505,6 @@ fun LibraryScreen(
             dismissButton = { TextButton(onClick = { membershipAlbum = null }) { Text("取消") } },
         )
     }
-
     shelfMenu?.let { shelf ->
         ModalBottomSheet(onDismissRequest = { shelfMenu = null }) {
             Text(shelf.name, Modifier.padding(horizontal = 24.dp), style = MaterialTheme.typography.headlineSmall)
@@ -1164,9 +1144,52 @@ private fun middleEllipsis(value: String, maxLength: Int = 60): String {
     return value.take(side) + "…" + value.takeLast(side)
 }
 
-internal fun albumRenameFieldValue(name: String) = TextFieldValue(
-    text = name,
-    selection = TextRange(name.length),
+@Composable
+private fun AlbumRenameDialog(
+    album: AlbumSummary,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+    onRestore: () -> Unit,
+) {
+    val nameState = remember(album.id) { albumRenameFieldState(album.name) }
+    val horizontalScrollState = rememberScrollState()
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("重命名画册") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    "来源名称：${album.sourceName}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedTextField(
+                    state = nameState,
+                    modifier = Modifier.fillMaxWidth(),
+                    label = { Text("显示名称") },
+                    supportingText = { Text("留空会恢复来源名称，不会改动设备文件夹。") },
+                    inputTransformation = InputTransformation.maxLength(100),
+                    lineLimits = TextFieldLineLimits.SingleLine,
+                    scrollState = horizontalScrollState,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onSave(nameState.text.toString()) }) { Text("保存") }
+        },
+        dismissButton = {
+            Row {
+                TextButton(onClick = onRestore) { Text("恢复来源名称") }
+                TextButton(onClick = onDismiss) { Text("取消") }
+            }
+        },
+    )
+}
+
+internal fun albumRenameFieldState(name: String) = TextFieldState(
+    initialText = name,
+    initialSelection = TextRange(name.length),
 )
 
 @Composable

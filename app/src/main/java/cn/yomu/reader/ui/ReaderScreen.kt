@@ -5,12 +5,19 @@ import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.LocalActivity
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.VectorConverter
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.rememberSplineBasedDecay
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
@@ -35,6 +42,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -42,10 +50,13 @@ import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.ViewAgenda
 import androidx.compose.material.icons.outlined.ViewCarousel
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -57,15 +68,19 @@ import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -79,8 +94,11 @@ import cn.yomu.reader.model.ImageRef
 import cn.yomu.reader.model.ReaderPreferences
 import cn.yomu.reader.model.ReadingDirection
 import cn.yomu.reader.model.ReadingMode
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlin.math.hypot
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 @Composable
@@ -284,24 +302,41 @@ private fun ZoomablePage(
         val density = LocalDensity.current
         val targetWidth = with(density) { maxWidth.roundToPx() * 2 }
         val state by rememberBitmap(resolver, uri, targetWidth)
+        val scope = rememberCoroutineScope()
+        val flingDecay = rememberSplineBasedDecay<Offset>()
         var scale by remember(uri) { mutableFloatStateOf(1f) }
         var offset by remember(uri) { mutableStateOf(Offset.Zero) }
+        var flingJob by remember(uri) { mutableStateOf<Job?>(null) }
         val viewWidth = constraints.maxWidth.toFloat()
         val viewHeight = constraints.maxHeight.toFloat()
+        val readyBitmap = (state as? BitmapLoadState.Ready)?.bitmap
         val transformState = rememberTransformableState { _, zoom, pan, _ ->
+            flingJob?.cancel()
             val newScale = (scale * zoom).coerceIn(1f, 5f)
             scale = newScale
-            if (newScale == 1f) {
-                offset = Offset.Zero
-            } else {
-                val maxX = (viewWidth * (newScale - 1f) / 2f).coerceAtLeast(0f)
-                val maxY = (viewHeight * (newScale - 1f) / 2f).coerceAtLeast(0f)
-                offset = Offset(
-                    (offset.x + pan.x).coerceIn(-maxX, maxX),
-                    (offset.y + pan.y).coerceIn(-maxY, maxY),
-                )
-            }
+            val bounds = readyBitmap?.let {
+                zoomPanBounds(viewWidth, viewHeight, it.width.toFloat(), it.height.toFloat(), newScale)
+            } ?: Offset.Zero
+            offset = clampPanOffset(if (newScale == 1f) Offset.Zero else offset + pan, bounds)
             onZoomChanged(newScale > 1.02f)
+        }
+        val currentScale = rememberUpdatedState(scale)
+        val currentOffset = rememberUpdatedState(offset)
+        val currentBitmap = rememberUpdatedState(readyBitmap)
+        val currentViewWidth = rememberUpdatedState(viewWidth)
+        val currentViewHeight = rememberUpdatedState(viewHeight)
+
+        LaunchedEffect(readyBitmap, viewWidth, viewHeight, scale) {
+            readyBitmap?.let {
+                val bounds = zoomPanBounds(
+                    viewWidth,
+                    viewHeight,
+                    it.width.toFloat(),
+                    it.height.toFloat(),
+                    scale,
+                )
+                offset = clampPanOffset(offset, bounds)
+            }
         }
 
         when (val value = state) {
@@ -325,8 +360,73 @@ private fun ZoomablePage(
                         canPan = { scale > 1.02f },
                     )
                     .pointerInput(uri) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(
+                                requireUnconsumed = false,
+                                pass = PointerEventPass.Initial,
+                            )
+                            flingJob?.cancel()
+                            val velocityTracker = VelocityTracker()
+                            velocityTracker.addPosition(down.uptimeMillis, down.position)
+                            var previousPosition = down.position
+                            var travelDistance = 0f
+                            var usedMultiplePointers = false
+                            var released = false
+
+                            while (true) {
+                                val event = awaitPointerEvent(PointerEventPass.Initial)
+                                if (event.changes.count { it.pressed } > 1) usedMultiplePointers = true
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                travelDistance += (change.position - previousPosition).getDistance()
+                                previousPosition = change.position
+                                velocityTracker.addPosition(change.uptimeMillis, change.position)
+                                if (!change.pressed) {
+                                    released = true
+                                    break
+                                }
+                            }
+
+                            val bitmap = currentBitmap.value
+                            if (
+                                released &&
+                                !usedMultiplePointers &&
+                                travelDistance >= viewConfiguration.touchSlop &&
+                                currentScale.value > 1.02f &&
+                                bitmap != null
+                            ) {
+                                val velocity = velocityTracker.calculateVelocity()
+                                val speed = hypot(velocity.x, velocity.y)
+                                val minimumFlingSpeed = with(density) { 80.dp.toPx() }
+                                if (speed >= minimumFlingSpeed) {
+                                    val bounds = zoomPanBounds(
+                                        currentViewWidth.value,
+                                        currentViewHeight.value,
+                                        bitmap.width.toFloat(),
+                                        bitmap.height.toFloat(),
+                                        currentScale.value,
+                                    )
+                                    val startOffset = clampPanOffset(currentOffset.value, bounds)
+                                    flingJob = scope.launch {
+                                        val animation = Animatable(startOffset, Offset.VectorConverter)
+                                        animation.updateBounds(
+                                            lowerBound = Offset(-bounds.x, -bounds.y),
+                                            upperBound = bounds,
+                                        )
+                                        animation.animateDecay(
+                                            initialVelocity = Offset(velocity.x, velocity.y),
+                                            animationSpec = flingDecay,
+                                        ) {
+                                            offset = this.value
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    .pointerInput(uri) {
                         detectTapGestures(
                             onDoubleTap = {
+                                flingJob?.cancel()
                                 scale = if (scale > 1f) 1f else 2.5f
                                 if (scale == 1f) offset = Offset.Zero
                                 onZoomChanged(scale > 1f)
@@ -341,6 +441,30 @@ private fun ZoomablePage(
         }
     }
 }
+
+internal fun zoomPanBounds(
+    viewWidth: Float,
+    viewHeight: Float,
+    imageWidth: Float,
+    imageHeight: Float,
+    scale: Float,
+): Offset {
+    if (viewWidth <= 0f || viewHeight <= 0f || imageWidth <= 0f || imageHeight <= 0f || scale <= 1f) {
+        return Offset.Zero
+    }
+    val fitScale = min(viewWidth / imageWidth, viewHeight / imageHeight)
+    val scaledWidth = imageWidth * fitScale * scale
+    val scaledHeight = imageHeight * fitScale * scale
+    return Offset(
+        x = ((scaledWidth - viewWidth) / 2f).coerceAtLeast(0f),
+        y = ((scaledHeight - viewHeight) / 2f).coerceAtLeast(0f),
+    )
+}
+
+internal fun clampPanOffset(value: Offset, bounds: Offset) = Offset(
+    x = value.x.coerceIn(-bounds.x, bounds.x),
+    y = value.y.coerceIn(-bounds.y, bounds.y),
+)
 
 @Composable
 private fun WebtoonReader(
@@ -404,6 +528,7 @@ private fun WebtoonPage(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ReaderChrome(
     visible: Boolean,
@@ -417,6 +542,9 @@ private fun ReaderChrome(
     onModeChange: (ReadingMode) -> Unit,
     onDirectionChange: () -> Unit,
 ) {
+    val sliderColors = SliderDefaults.colors()
+    val sliderInteractionSource = remember { MutableInteractionSource() }
+
     AnimatedVisibility(
         visible = visible,
         enter = fadeIn() + slideInVertically { -it / 2 },
@@ -473,6 +601,16 @@ private fun ReaderChrome(
                         onValueChangeFinished = onSeekFinished,
                         valueRange = 0f..album.images.lastIndex.coerceAtLeast(1).toFloat(),
                         steps = (album.images.size - 2).coerceIn(0, 100),
+                        colors = sliderColors,
+                        interactionSource = sliderInteractionSource,
+                        thumb = {
+                            Box(
+                                Modifier
+                                    .size(14.dp)
+                                    .background(MaterialTheme.colorScheme.primary, CircleShape),
+                            )
+                        },
+                        track = { state -> ReaderProgressTrack(state) },
                     )
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -498,6 +636,34 @@ private fun ReaderChrome(
                     Spacer(Modifier.height(4.dp))
                 }
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ReaderProgressTrack(state: SliderState) {
+    val activeColor = MaterialTheme.colorScheme.primary
+    val inactiveColor = activeColor.copy(alpha = 0.24f)
+    val range = state.valueRange
+    val fraction = if (range.endInclusive > range.start) {
+        ((state.value - range.start) / (range.endInclusive - range.start)).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+
+    Canvas(Modifier.fillMaxWidth().height(3.dp)) {
+        val radius = size.height / 2f
+        drawRoundRect(
+            color = inactiveColor,
+            cornerRadius = CornerRadius(radius, radius),
+        )
+        if (fraction > 0f) {
+            drawRoundRect(
+                color = activeColor,
+                size = size.copy(width = size.width * fraction),
+                cornerRadius = CornerRadius(radius, radius),
+            )
         }
     }
 }

@@ -35,7 +35,7 @@ Yomu 是一个专注于本地图片的 Android 阅读器。
 2. 安装 Android SDK 37.1，并让 Gradle 使用 JDK 17。
 3. 等待 Gradle 同步后，运行 `app` 配置；或执行 `gradlew.bat assembleDebug`。
 
-调试 APK 会生成在 `app/build/outputs/apk/debug/app-debug.apk`。当前版本为 0.3.1。
+调试 APK 会生成在 `app/build/outputs/apk/debug/app-debug.apk`。当前版本为 0.3.2。
 
 ## 关于隐藏目录
 
