@@ -16,8 +16,8 @@ android {
         applicationId = "cn.yomu.reader"
         minSdk = 23
         targetSdk = 36
-        versionCode = 6
-        versionName = "0.3.2"
+        versionCode = 7
+        versionName = "0.3.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -43,6 +43,8 @@ android {
         compose = true
         buildConfig = true
     }
+
+    testOptions.unitTests.isIncludeAndroidResources = true
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -76,6 +78,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest:1.11.4")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.16.1")
+    testImplementation("androidx.compose.ui:ui-test-junit4:1.11.4")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
     androidTestImplementation("androidx.room:room-testing:2.8.4")

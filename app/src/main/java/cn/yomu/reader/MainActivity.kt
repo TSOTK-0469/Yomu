@@ -23,6 +23,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.yomu.reader.ui.LibraryScreen
+import cn.yomu.reader.ui.SettingsScreen
 import cn.yomu.reader.ui.ReaderScreen
 import cn.yomu.reader.ui.theme.YomuTheme
 
@@ -43,6 +44,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun YomuApp(viewModel: MainViewModel) {
     val state by viewModel.state.collectAsStateWithLifecycle()
+    var readerSettingsOpen by rememberSaveable(state.openAlbum?.id) { mutableStateOf(false) }
     val resolver = LocalContext.current.contentResolver
     val snackbarHostState = remember { SnackbarHostState() }
     var reauthorizeMountId by rememberSaveable { mutableStateOf<String?>(null) }
@@ -73,7 +75,8 @@ private fun YomuApp(viewModel: MainViewModel) {
                 onBack = viewModel::closeReader,
                 onProgress = { viewModel.saveProgress(album.id, it) },
                 onImageLoadFailed = { viewModel.imageLoadFailed(album.id, it) },
-                onPreferencesChange = viewModel::setReaderPreferences,
+                settingsOpen = readerSettingsOpen,
+                onOpenSettings = { readerSettingsOpen = true },
             )
         } ?: LibraryScreen(
             library = state.library,
@@ -85,6 +88,8 @@ private fun YomuApp(viewModel: MainViewModel) {
             openingAlbum = state.openingAlbum,
             openingFeedback = state.openingFeedback,
             gridDensity = state.gridDensity,
+            readerPreferences = state.readerPreferences,
+            onReaderPreferencesChange = viewModel::setReaderPreferences,
             diskCacheBytes = state.diskCacheBytes,
             coverPicker = state.coverPicker,
             onPickFolder = {
@@ -123,6 +128,18 @@ private fun YomuApp(viewModel: MainViewModel) {
             onGridDensityChange = viewModel::setGridDensity,
             onCancelOpen = viewModel::cancelOpenAlbum,
         )
+
+        if (state.openAlbum != null && readerSettingsOpen) {
+            SettingsScreen(
+                preferences = state.readerPreferences,
+                onPreferencesChange = viewModel::setReaderPreferences,
+                density = state.gridDensity,
+                diskCacheBytes = state.diskCacheBytes,
+                onDensityChange = viewModel::setGridDensity,
+                onClearCache = viewModel::clearImageCache,
+                onBack = { readerSettingsOpen = false },
+            )
+        }
 
         SnackbarHost(
             hostState = snackbarHostState,

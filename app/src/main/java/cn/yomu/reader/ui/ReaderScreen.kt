@@ -46,9 +46,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.SwapHoriz
-import androidx.compose.material.icons.outlined.ViewAgenda
-import androidx.compose.material.icons.outlined.ViewCarousel
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -62,6 +60,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -81,6 +81,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.util.VelocityTracker
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
@@ -109,7 +110,8 @@ fun ReaderScreen(
     onBack: () -> Unit,
     onProgress: (Int) -> Unit,
     onImageLoadFailed: (ImageRef) -> Unit,
-    onPreferencesChange: (ReaderPreferences) -> Unit,
+    settingsOpen: Boolean,
+    onOpenSettings: () -> Unit,
 ) {
     val activity = LocalActivity.current ?: return
     var chromeVisible by remember { mutableStateOf(true) }
@@ -120,20 +122,6 @@ fun ReaderScreen(
     val pagerState = rememberPagerState(initialPage = currentPage) { album.images.size }
     val listState = rememberLazyListState(initialFirstVisibleItemIndex = currentPage)
     val scope = rememberCoroutineScope()
-
-    LaunchedEffect(album.images, preferences.mode) {
-        val target = album.images.indexOfFirst { it.uri == currentImageUri }
-            .takeIf { it >= 0 }
-            ?: currentPage.coerceIn(0, album.images.lastIndex)
-        if (target != currentPage) {
-            currentPage = target
-            seekValue = target.toFloat()
-            onProgress(target)
-            if (preferences.mode == ReadingMode.PAGER) pagerState.scrollToPage(target)
-            else listState.scrollToItem(target)
-        }
-        currentImageUri = album.images[target].uri
-    }
 
     BackHandler(onBack = onBack)
 
@@ -146,17 +134,27 @@ fun ReaderScreen(
         }
     }
 
-    DisposableEffect(chromeVisible) {
+    val darkTheme = isSystemInDarkTheme()
+    DisposableEffect(chromeVisible, settingsOpen, darkTheme) {
         val controller = WindowCompat.getInsetsController(activity.window, activity.window.decorView)
         controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.isAppearanceLightStatusBars = false
-        controller.isAppearanceLightNavigationBars = false
-        if (chromeVisible) controller.show(WindowInsetsCompat.Type.systemBars())
+        controller.isAppearanceLightStatusBars = settingsOpen && !darkTheme
+        controller.isAppearanceLightNavigationBars = settingsOpen && !darkTheme
+        if (chromeVisible || settingsOpen) controller.show(WindowInsetsCompat.Type.systemBars())
         else controller.hide(WindowInsetsCompat.Type.systemBars())
         onDispose { }
     }
 
-    LaunchedEffect(preferences.mode, album.id) {
+    LaunchedEffect(preferences.mode, preferences.direction, album.id, album.images) {
+        // Restore the image before observing the newly active reader's position.
+        val target = album.images.indexOfFirst { it.uri == currentImageUri }
+            .takeIf { it >= 0 } ?: currentPage.coerceIn(0, album.images.lastIndex)
+        currentPage = target
+        currentImageUri = album.images[target].uri
+        seekValue = target.toFloat()
+        if (preferences.mode == ReadingMode.PAGER) pagerState.scrollToPage(target)
+        else listState.scrollToItem(target)
+
         if (preferences.mode == ReadingMode.PAGER) {
             snapshotFlow { pagerState.currentPage }
                 .distinctUntilChanged()
@@ -184,14 +182,16 @@ fun ReaderScreen(
             .background(Color.Black),
     ) {
         when (preferences.mode) {
-            ReadingMode.PAGER -> PagerReader(
-                album = album,
-                resolver = resolver,
-                pagerState = pagerState,
-                direction = preferences.direction,
-                onToggleChrome = { chromeVisible = !chromeVisible },
-                onImageLoadFailed = onImageLoadFailed,
-            )
+            ReadingMode.PAGER -> key(preferences.direction) {
+                PagerReader(
+                    album = album,
+                    resolver = resolver,
+                    pagerState = pagerState,
+                    direction = preferences.direction,
+                    onToggleChrome = { chromeVisible = !chromeVisible },
+                    onImageLoadFailed = onImageLoadFailed,
+                )
+            }
             ReadingMode.WEBTOON -> WebtoonReader(
                 album = album,
                 resolver = resolver,
@@ -202,11 +202,10 @@ fun ReaderScreen(
         }
 
         ReaderChrome(
-            visible = chromeVisible,
+            visible = chromeVisible && !settingsOpen,
             album = album,
             currentPage = currentPage,
             seekValue = seekValue,
-            preferences = preferences,
             onBack = onBack,
             onSeekChange = {
                 isSeeking = true
@@ -222,24 +221,7 @@ fun ReaderScreen(
                     isSeeking = false
                 }
             },
-            onModeChange = { mode ->
-                onPreferencesChange(preferences.copy(mode = mode))
-                scope.launch {
-                    if (mode == ReadingMode.PAGER) pagerState.scrollToPage(currentPage)
-                    else listState.scrollToItem(currentPage)
-                }
-            },
-            onDirectionChange = {
-                onPreferencesChange(
-                    preferences.copy(
-                        direction = if (preferences.direction == ReadingDirection.LEFT_TO_RIGHT) {
-                            ReadingDirection.RIGHT_TO_LEFT
-                        } else {
-                            ReadingDirection.LEFT_TO_RIGHT
-                        },
-                    ),
-                )
-            },
+            onOpenSettings = onOpenSettings,
         )
     }
 }
@@ -299,9 +281,32 @@ private fun ZoomablePage(
     onTap: (Float) -> Unit,
 ) {
     BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        val density = LocalDensity.current
-        val targetWidth = with(density) { maxWidth.roundToPx() * 2 }
+        val targetWidth = with(LocalDensity.current) { maxWidth.roundToPx() * 2 }
         val state by rememberBitmap(resolver, uri, targetWidth)
+        when (val value = state) {
+            BitmapLoadState.Loading -> CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp)
+            BitmapLoadState.Failed -> Text("图片无法解码", color = Color.White.copy(alpha = 0.72f))
+            is BitmapLoadState.Ready -> ZoomableImage(value.bitmap, uri, contentDescription, onZoomChanged, onTap)
+        }
+        LaunchedEffect(state, uri) {
+            if (state == BitmapLoadState.Failed) onImageLoadFailed()
+        }
+    }
+}
+
+internal val ImageScaleKey = androidx.compose.ui.semantics.SemanticsPropertyKey<Float>("ImageScale")
+internal val ImageOffsetKey = androidx.compose.ui.semantics.SemanticsPropertyKey<Offset>("ImageOffset")
+
+@Composable
+internal fun ZoomableImage(
+    bitmap: android.graphics.Bitmap,
+    uri: String,
+    contentDescription: String,
+    onZoomChanged: (Boolean) -> Unit,
+    onTap: (Float) -> Unit,
+) {
+    BoxWithConstraints(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val density = LocalDensity.current
         val scope = rememberCoroutineScope()
         val flingDecay = rememberSplineBasedDecay<Offset>()
         var scale by remember(uri) { mutableFloatStateOf(1f) }
@@ -309,138 +314,141 @@ private fun ZoomablePage(
         var flingJob by remember(uri) { mutableStateOf<Job?>(null) }
         val viewWidth = constraints.maxWidth.toFloat()
         val viewHeight = constraints.maxHeight.toFloat()
-        val readyBitmap = (state as? BitmapLoadState.Ready)?.bitmap
-        val transformState = rememberTransformableState { _, zoom, pan, _ ->
+        val transformState = rememberTransformableState { centroid, zoom, pan, _ ->
             flingJob?.cancel()
             val newScale = (scale * zoom).coerceIn(1f, 5f)
+            val bounds = zoomPanBounds(viewWidth, viewHeight, bitmap.width.toFloat(), bitmap.height.toFloat(), newScale)
+            offset = clampPanOffset(
+                anchoredZoomOffset(offset, centroid, Offset(viewWidth / 2f, viewHeight / 2f), newScale / scale, pan),
+                bounds,
+            )
             scale = newScale
-            val bounds = readyBitmap?.let {
-                zoomPanBounds(viewWidth, viewHeight, it.width.toFloat(), it.height.toFloat(), newScale)
-            } ?: Offset.Zero
-            offset = clampPanOffset(if (newScale == 1f) Offset.Zero else offset + pan, bounds)
             onZoomChanged(newScale > 1.02f)
         }
         val currentScale = rememberUpdatedState(scale)
         val currentOffset = rememberUpdatedState(offset)
-        val currentBitmap = rememberUpdatedState(readyBitmap)
+        val currentBitmap = rememberUpdatedState(bitmap)
         val currentViewWidth = rememberUpdatedState(viewWidth)
         val currentViewHeight = rememberUpdatedState(viewHeight)
 
-        LaunchedEffect(readyBitmap, viewWidth, viewHeight, scale) {
-            readyBitmap?.let {
-                val bounds = zoomPanBounds(
-                    viewWidth,
-                    viewHeight,
-                    it.width.toFloat(),
-                    it.height.toFloat(),
-                    scale,
-                )
-                offset = clampPanOffset(offset, bounds)
-            }
+        LaunchedEffect(bitmap, viewWidth, viewHeight) {
+            flingJob?.cancel()
+            val bounds = zoomPanBounds(
+                viewWidth, viewHeight, bitmap.width.toFloat(), bitmap.height.toFloat(), scale,
+            )
+            offset = clampPanOffset(offset, bounds)
         }
 
-        when (val value = state) {
-            BitmapLoadState.Loading -> CircularProgressIndicator(color = Color.White, strokeWidth = 2.dp)
-            BitmapLoadState.Failed -> Text("图片无法解码", color = Color.White.copy(alpha = 0.72f))
-            is BitmapLoadState.Ready -> Image(
-                bitmap = value.bitmap.asImageBitmap(),
-                contentDescription = contentDescription,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .graphicsLayer {
-                        scaleX = scale
-                        scaleY = scale
-                        translationX = offset.x
-                        translationY = offset.y
-                    }
-                    .transformable(
-                        state = transformState,
-                        lockRotationOnZoomPan = true,
-                        canPan = { scale > 1.02f },
-                    )
-                    .pointerInput(uri) {
-                        awaitEachGesture {
-                            val down = awaitFirstDown(
-                                requireUnconsumed = false,
-                                pass = PointerEventPass.Initial,
-                            )
-                            flingJob?.cancel()
-                            val velocityTracker = VelocityTracker()
-                            velocityTracker.addPosition(down.uptimeMillis, down.position)
-                            var previousPosition = down.position
-                            var travelDistance = 0f
-                            var usedMultiplePointers = false
-                            var released = false
+        Image(
+            bitmap = bitmap.asImageBitmap(),
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .transformable(
+                    state = transformState,
+                    lockRotationOnZoomPan = true,
+                    canPan = { scale > 1.02f },
+                )
+                .pointerInput(uri, viewWidth, viewHeight, bitmap) {
+                    awaitEachGesture {
+                        val down = awaitFirstDown(
+                            requireUnconsumed = false,
+                            pass = PointerEventPass.Initial,
+                        )
+                        flingJob?.cancel()
+                        val velocityTracker = VelocityTracker()
+                        velocityTracker.addPosition(down.uptimeMillis, down.position)
+                        var previousPosition = down.position
+                        var travelDistance = 0f
+                        var usedMultiplePointers = false
+                        var released = false
 
-                            while (true) {
-                                val event = awaitPointerEvent(PointerEventPass.Initial)
-                                if (event.changes.count { it.pressed } > 1) usedMultiplePointers = true
-                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
-                                travelDistance += (change.position - previousPosition).getDistance()
-                                previousPosition = change.position
-                                velocityTracker.addPosition(change.uptimeMillis, change.position)
-                                if (!change.pressed) {
-                                    released = true
-                                    break
-                                }
+                        while (true) {
+                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                            if (event.changes.count { it.pressed } > 1) usedMultiplePointers = true
+                            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                            travelDistance += (change.position - previousPosition).getDistance()
+                            previousPosition = change.position
+                            velocityTracker.addPosition(change.uptimeMillis, change.position)
+                            if (!change.pressed) {
+                                released = true
+                                break
                             }
+                        }
 
-                            val bitmap = currentBitmap.value
-                            if (
-                                released &&
-                                !usedMultiplePointers &&
-                                travelDistance >= viewConfiguration.touchSlop &&
-                                currentScale.value > 1.02f &&
-                                bitmap != null
-                            ) {
-                                val velocity = velocityTracker.calculateVelocity()
-                                val speed = hypot(velocity.x, velocity.y)
-                                val minimumFlingSpeed = with(density) { 80.dp.toPx() }
-                                if (speed >= minimumFlingSpeed) {
-                                    val bounds = zoomPanBounds(
-                                        currentViewWidth.value,
-                                        currentViewHeight.value,
-                                        bitmap.width.toFloat(),
-                                        bitmap.height.toFloat(),
-                                        currentScale.value,
+                        val bitmap = currentBitmap.value
+                        if (
+                            released &&
+                            !usedMultiplePointers &&
+                            travelDistance >= viewConfiguration.touchSlop &&
+                            currentScale.value > 1.02f
+                        ) {
+                            val velocity = velocityTracker.calculateVelocity()
+                            val speed = hypot(velocity.x, velocity.y)
+                            val minimumFlingSpeed = with(density) { 80.dp.toPx() }
+                            if (speed >= minimumFlingSpeed) {
+                                val bounds = zoomPanBounds(
+                                    currentViewWidth.value,
+                                    currentViewHeight.value,
+                                    bitmap.width.toFloat(),
+                                    bitmap.height.toFloat(),
+                                    currentScale.value,
+                                )
+                                val startOffset = clampPanOffset(currentOffset.value, bounds)
+                                flingJob = scope.launch {
+                                    val animation = Animatable(startOffset, Offset.VectorConverter)
+                                    animation.updateBounds(
+                                        lowerBound = Offset(-bounds.x, -bounds.y),
+                                        upperBound = bounds,
                                     )
-                                    val startOffset = clampPanOffset(currentOffset.value, bounds)
-                                    flingJob = scope.launch {
-                                        val animation = Animatable(startOffset, Offset.VectorConverter)
-                                        animation.updateBounds(
-                                            lowerBound = Offset(-bounds.x, -bounds.y),
-                                            upperBound = bounds,
-                                        )
-                                        animation.animateDecay(
-                                            initialVelocity = Offset(velocity.x, velocity.y),
-                                            animationSpec = flingDecay,
-                                        ) {
-                                            offset = this.value
-                                        }
+                                    animation.animateDecay(
+                                        initialVelocity = Offset(velocity.x, velocity.y),
+                                        animationSpec = flingDecay,
+                                    ) {
+                                        offset = this.value
                                     }
                                 }
                             }
                         }
                     }
-                    .pointerInput(uri) {
-                        detectTapGestures(
-                            onDoubleTap = {
-                                flingJob?.cancel()
-                                scale = if (scale > 1f) 1f else 2.5f
-                                if (scale == 1f) offset = Offset.Zero
-                                onZoomChanged(scale > 1f)
-                            },
-                            onTap = { onTap(it.x / size.width.coerceAtLeast(1)) },
-                        )
-                    },
-            )
-        }
-        LaunchedEffect(state, uri) {
-            if (state == BitmapLoadState.Failed) onImageLoadFailed()
-        }
+                }
+                .pointerInput(uri, viewWidth, viewHeight, bitmap) {
+                    detectTapGestures(
+                        onDoubleTap = { position ->
+                            flingJob?.cancel()
+                            val newScale = if (scale > 1f) 1f else 2.5f
+                            val bounds = zoomPanBounds(viewWidth, viewHeight, bitmap.width.toFloat(), bitmap.height.toFloat(), newScale)
+                            offset = clampPanOffset(
+                                anchoredZoomOffset(offset, position, Offset(viewWidth / 2f, viewHeight / 2f), newScale / scale),
+                                bounds,
+                            )
+                            scale = newScale
+                            onZoomChanged(scale > 1f)
+                        },
+                        onTap = { onTap(it.x / size.width.coerceAtLeast(1)) },
+                    )
+                }
+                // Keep gesture receivers outside this layer so deltas and velocity stay in screen pixels.
+                .graphicsLayer {
+                    scaleX = scale
+                    scaleY = scale
+                    translationX = offset.x
+                    translationY = offset.y
+                },
+        )
+        Box(Modifier.semantics { this[ImageScaleKey] = scale; this[ImageOffsetKey] = offset })
     }
 }
+
+// The focal point is in viewport coordinates, as are all pan and fling distances.
+internal fun anchoredZoomOffset(
+    offset: Offset,
+    focalPoint: Offset,
+    viewportCenter: Offset,
+    ratio: Float,
+    pan: Offset = Offset.Zero,
+): Offset = (offset - (focalPoint - viewportCenter)) * ratio + (focalPoint - viewportCenter) + pan
 
 internal fun zoomPanBounds(
     viewWidth: Float,
@@ -535,12 +543,10 @@ private fun ReaderChrome(
     album: Album,
     currentPage: Int,
     seekValue: Float,
-    preferences: ReaderPreferences,
     onBack: () -> Unit,
     onSeekChange: (Float) -> Unit,
     onSeekFinished: () -> Unit,
-    onModeChange: (ReadingMode) -> Unit,
-    onDirectionChange: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val sliderColors = SliderDefaults.colors()
     val sliderInteractionSource = remember { MutableInteractionSource() }
@@ -612,26 +618,10 @@ private fun ReaderChrome(
                         },
                         track = { state -> ReaderProgressTrack(state) },
                     )
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceEvenly,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        ReaderAction(
-                            label = "分页",
-                            selected = preferences.mode == ReadingMode.PAGER,
-                            onClick = { onModeChange(ReadingMode.PAGER) },
-                        ) { Icon(Icons.Outlined.ViewCarousel, null) }
-                        ReaderAction(
-                            label = "长图",
-                            selected = preferences.mode == ReadingMode.WEBTOON,
-                            onClick = { onModeChange(ReadingMode.WEBTOON) },
-                        ) { Icon(Icons.Outlined.ViewAgenda, null) }
-                        ReaderAction(
-                            label = if (preferences.direction == ReadingDirection.LEFT_TO_RIGHT) "左 → 右" else "右 → 左",
-                            selected = false,
-                            onClick = onDirectionChange,
-                        ) { Icon(Icons.Outlined.SwapHoriz, null) }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                        ReaderAction(label = "设置", selected = false, onClick = onOpenSettings) {
+                            Icon(Icons.Outlined.Settings, null)
+                        }
                     }
                     Spacer(Modifier.height(4.dp))
                 }

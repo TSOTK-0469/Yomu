@@ -8,11 +8,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.input.InputTransformation
-import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
-import androidx.compose.foundation.text.input.maxLength
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -81,7 +77,6 @@ import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -125,6 +120,9 @@ import cn.yomu.reader.model.LibrarySnapshot
 import cn.yomu.reader.model.MountBrowserState
 import cn.yomu.reader.model.MountMode
 import cn.yomu.reader.model.MountedFolder
+import cn.yomu.reader.model.ReaderPreferences
+import cn.yomu.reader.model.ReadingMode
+import cn.yomu.reader.model.ReadingDirection
 import cn.yomu.reader.model.ScanProgress
 import kotlinx.coroutines.launch
 import java.text.DateFormat
@@ -144,6 +142,8 @@ fun LibraryScreen(
     openingAlbum: AlbumSummary?,
     openingFeedback: AlbumOpenFeedback,
     gridDensity: GridDensity,
+    readerPreferences: ReaderPreferences,
+    onReaderPreferencesChange: (ReaderPreferences) -> Unit,
     diskCacheBytes: Long,
     coverPicker: CoverPickerState?,
     onPickFolder: () -> Unit,
@@ -183,7 +183,8 @@ fun LibraryScreen(
     val clipboard = LocalClipboardManager.current
     var destinationName by rememberSaveable { mutableStateOf(LibraryDestination.LIBRARY.name) }
     val destination = LibraryDestination.valueOf(destinationName)
-    var query by remember { mutableStateOf("") }
+    val queryState = remember { TextFieldState() }
+    val query = queryState.text.toString()
     var selectedAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
     var renamingAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
     var membershipAlbum by remember { mutableStateOf<AlbumSummary?>(null) }
@@ -192,7 +193,8 @@ fun LibraryScreen(
     var shelfCoverPicker by remember { mutableStateOf<Bookshelf?>(null) }
     var showNameDialog by remember { mutableStateOf(false) }
     var editingShelf by remember { mutableStateOf<Bookshelf?>(null) }
-    var shelfName by remember { mutableStateOf("") }
+    val shelfNameState = remember { TextFieldState() }
+    val shelfName = shelfNameState.text.toString()
     var deleteShelf by remember { mutableStateOf<Bookshelf?>(null) }
     var removeMount by remember { mutableStateOf<MountedFolder?>(null) }
     var confirmRefreshAll by remember { mutableStateOf(false) }
@@ -242,7 +244,7 @@ fun LibraryScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant)
                         IconButton(onClick = {
                             editingShelf = null
-                            shelfName = ""
+                            shelfNameState.edit { replace(0, length, "") }
                             showNameDialog = true
                         }) { Icon(Icons.Outlined.Add, "新建书架") }
                     }
@@ -331,16 +333,14 @@ fun LibraryScreen(
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
                 if (library.allAlbums.isNotEmpty()) {
-                    OutlinedTextField(
-                        value = query,
-                        onValueChange = { query = it },
+                    AutoScrollingTextField(
+                        state = queryState,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 10.dp),
-                        singleLine = true,
                         shape = RoundedCornerShape(18.dp),
                         leadingIcon = { Icon(Icons.Outlined.Search, null) },
                         trailingIcon = {
                             AnimatedVisibility(query.isNotEmpty()) {
-                                IconButton(onClick = { query = "" }) { Icon(Icons.Outlined.Close, "清空搜索") }
+                                IconButton(onClick = { queryState.edit { replace(0, length, "") } }) { Icon(Icons.Outlined.Close, "清空搜索") }
                             }
                         },
                         placeholder = { Text("搜索当前书架") },
@@ -355,7 +355,7 @@ fun LibraryScreen(
                         allBookshelf = currentShelf.id == ALL_BOOKSHELF_ID,
                         onAction = {
                             when {
-                                query.isNotBlank() -> query = ""
+                                query.isNotBlank() -> queryState.edit { replace(0, length, "") }
                                 currentShelf.id != ALL_BOOKSHELF_ID -> onSelectBookshelf(ALL_BOOKSHELF_ID)
                                 else -> destinationName = LibraryDestination.MOUNTS.name
                             }
@@ -389,6 +389,8 @@ fun LibraryScreen(
                 onShowPath = { pathDialog = it },
             )
             LibraryDestination.SETTINGS -> SettingsScreen(
+                preferences = readerPreferences,
+                onPreferencesChange = onReaderPreferencesChange,
                 density = gridDensity,
                 diskCacheBytes = diskCacheBytes,
                 onDensityChange = onGridDensityChange,
@@ -513,7 +515,7 @@ fun LibraryScreen(
                 leadingContent = { Icon(Icons.Outlined.Edit, null) },
                 modifier = Modifier.combinedClickable(onClick = {
                     editingShelf = shelf
-                    shelfName = shelf.name
+                    shelfNameState.edit { replace(0, length, shelf.name); selection = TextRange(length) }
                     showNameDialog = true
                     shelfMenu = null
                 }),
@@ -544,11 +546,10 @@ fun LibraryScreen(
             onDismissRequest = { showNameDialog = false },
             title = { Text(if (editingShelf == null) "新建书架" else "重命名书架") },
             text = {
-                OutlinedTextField(
-                    value = shelfName,
-                    onValueChange = { if (it.length <= 40) shelfName = it },
+                AutoScrollingTextField(
+                    state = shelfNameState,
+                    maxLength = 40,
                     label = { Text("书架名称") },
-                    singleLine = true,
                 )
             },
             confirmButton = {
@@ -788,6 +789,7 @@ private fun AlbumGrid(
             ) {
                 Box(
                     Modifier.fillMaxWidth().aspectRatio(154f / 214f)
+                        .clip(RoundedCornerShape(8.dp))
                         .background(MaterialTheme.colorScheme.surfaceVariant),
                 ) {
                     Thumbnail(
@@ -1029,13 +1031,16 @@ private fun MountSourceCard(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SettingsScreen(
+internal fun SettingsScreen(
+    preferences: ReaderPreferences,
+    onPreferencesChange: (ReaderPreferences) -> Unit,
     density: GridDensity,
     diskCacheBytes: Long,
     onDensityChange: (GridDensity) -> Unit,
     onClearCache: () -> Unit,
     onBack: () -> Unit,
 ) {
+    BackHandler(onBack = onBack)
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         contentWindowInsets = WindowInsets(0, 0, 0, 0),
@@ -1054,6 +1059,37 @@ private fun SettingsScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            item { Text("阅读", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
+            item {
+                Text("阅读模式", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ReadingMode.entries.forEach { mode ->
+                        FilterChip(
+                            selected = preferences.mode == mode,
+                            onClick = { onPreferencesChange(preferences.copy(mode = mode)) },
+                            label = { Text(if (mode == ReadingMode.PAGER) "分页" else "长图") },
+                        )
+                    }
+                }
+                Text("阅读方向", style = MaterialTheme.typography.labelLarge)
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    ReadingDirection.entries.forEach { direction ->
+                        FilterChip(
+                            selected = preferences.direction == direction,
+                            enabled = preferences.mode == ReadingMode.PAGER,
+                            onClick = { onPreferencesChange(preferences.copy(direction = direction)) },
+                            label = { Text(if (direction == ReadingDirection.LEFT_TO_RIGHT) "从左到右" else "从右到左") },
+                        )
+                    }
+                }
+                Text(
+                    if (preferences.mode == ReadingMode.WEBTOON) "长图按上下滚动阅读，已保留分页阅读方向。"
+                    else "应用到所有画册，自动记住你的选择。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            item { HorizontalDivider(Modifier.padding(vertical = 4.dp)) }
             item { Text("主页布局", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }
             item {
                 Text("更改后立即应用；横屏和平板会自动增加列数。", color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1152,7 +1188,6 @@ private fun AlbumRenameDialog(
     onRestore: () -> Unit,
 ) {
     val nameState = remember(album.id) { albumRenameFieldState(album.name) }
-    val horizontalScrollState = rememberScrollState()
 
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -1164,14 +1199,12 @@ private fun AlbumRenameDialog(
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedTextField(
+                AutoScrollingTextField(
                     state = nameState,
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("显示名称") },
                     supportingText = { Text("留空会恢复来源名称，不会改动设备文件夹。") },
-                    inputTransformation = InputTransformation.maxLength(100),
-                    lineLimits = TextFieldLineLimits.SingleLine,
-                    scrollState = horizontalScrollState,
+                    maxLength = 100,
                 )
             }
         },
